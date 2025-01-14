@@ -1,0 +1,39 @@
+{
+  "name": "json-repair-js",
+  "version": "1.0.0",
+  "description": "JavaScript library to repair broken/invalid JSON strings, especially from LLM outputs",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "keywords": [
+    "json",
+    "repair",
+    "fix",
+    "invalid",
+    "broken",
+    "llm",
+    "ai",
+    "chatgpt",
+    "parser"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahgsql/json-repair-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ahgsql/json-repair-js/issues"
+  },
+  "homepage": "https://github.com/ahgsql/json-repair-js#readme",
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md"
+  ]
+}
