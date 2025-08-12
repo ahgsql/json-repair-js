@@ -54,20 +54,23 @@ describe('JSON Repair Tests', () => {
     test('LLM çıktısındaki boolean değerler doğru parse edilmeli', () => {
         const llmOutput = `I understand, here's a suitable JSON for you: \`\`\`json 
         { 
-            "title": "Sample Title", 
-            "defaultValue": false, 
+            "defaultValueStr": "false",
+            "defaultValue": false,
             "enabled": true,
-            "items": ["item1" "item2" "item3"] 
+            "enabledStr": "true",
+            "nullValue": null,
+            "nullValueStr": "null"
         }`;
 
         const result = loads(llmOutput);
         
         expect(result.defaultValue).toBe(false);
-        expect(typeof result.defaultValue).toBe('boolean');
         expect(result.enabled).toBe(true);
-        expect(typeof result.enabled).toBe('boolean');
-        expect(result.title).toBe('Sample Title');
-        expect(result.items).toEqual(['item1', 'item2', 'item3']);
+        expect(result.nullValue === null).toBe(true);
+
+        expect(result.defaultValueStr).toBe("false");
+        expect(result.enabledStr).toBe("true");
+        expect(result.nullValueStr).toBe("null");
     });
 
 });

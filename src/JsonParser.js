@@ -233,8 +233,7 @@ class JsonParser {
         }
 
         // Convert value types for unquoted strings
-        const converted = this.convertStringToType(str.trim());
-        return converted !== null ? converted : str;
+        return this.convertStringToType(str.trim());
     }
 
     /**
@@ -255,7 +254,7 @@ class JsonParser {
         if (lower === "false") return false;
         if (lower === "null") return null;
 
-        return null; // cannot convert
+        return str; // cannot convert
     }
 
     skipWhitespace() {
