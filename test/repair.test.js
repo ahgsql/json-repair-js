@@ -30,5 +30,47 @@ describe('JSON Repair Tests', () => {
         expect(result).toBe('{\n  "test": "Türkçe"\n}');
     });
 
+    test('Boolean değerler doğru tip olarak parse edilmeli', () => {
+        const testCases = [
+            { input: '{ "flag": true }', expected: { flag: true } },
+            { input: '{ "flag": false }', expected: { flag: false } },
+            { input: '{ flag: true }', expected: { flag: true } },
+            { input: '{ flag: false }', expected: { flag: false } },
+            { input: '{ "enabled": TRUE }', expected: { enabled: true } },
+            { input: '{ "disabled": FALSE }', expected: { disabled: false } }
+        ];
+
+        testCases.forEach(({ input, expected }) => {
+            const result = loads(input);
+            expect(result).toEqual(expected);
+            
+            // Type kontrolü
+            Object.keys(expected).forEach(key => {
+                expect(typeof result[key]).toBe(typeof expected[key]);
+            });
+        });
+    });
+
+    test('LLM çıktısındaki boolean değerler doğru parse edilmeli', () => {
+        const llmOutput = `I understand, here's a suitable JSON for you: \`\`\`json 
+        { 
+            "defaultValueStr": "false",
+            "defaultValue": false,
+            "enabled": true,
+            "enabledStr": "true",
+            "nullValue": null,
+            "nullValueStr": "null"
+        }`;
+
+        const result = loads(llmOutput);
+        
+        expect(result.defaultValue).toBe(false);
+        expect(result.enabled).toBe(true);
+        expect(result.nullValue === null).toBe(true);
+
+        expect(result.defaultValueStr).toBe("false");
+        expect(result.enabledStr).toBe("true");
+        expect(result.nullValueStr).toBe("null");
+    });
 
 });

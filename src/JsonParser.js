@@ -5,7 +5,7 @@ const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D]); // space, tab, newline, re
 const QUOTES = new Set([0x22, 0x27]); // " and '
 
 class JsonParser {
-    constructor(jsonStr = "", logging = false) {
+    constructor (jsonStr = "", logging = false) {
         this.jsonStr = jsonStr;
         this.index = 0;
         this.context = new JsonContext();
@@ -29,7 +29,7 @@ class JsonParser {
 
         while (this.index < this.jsonStr.length) {
             const char = this.peek();
-            
+
             // Handle code blocks in markdown/text
             if (char === '`') {
                 if (this.jsonStr.slice(this.index, this.index + 3) === '```') {
@@ -61,7 +61,7 @@ class JsonParser {
         const char = this.peek();
 
         if (!char) return "";
-        
+
         if (char === "{") return this.parseObject();
         if (char === "[") return this.parseArray();
         if (STRING_DELIMITERS.includes(char)) return this.parseString();
@@ -78,7 +78,7 @@ class JsonParser {
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
-            
+
             if (this.peek() === "}") {
                 this.index++;
                 break;
@@ -99,7 +99,7 @@ class JsonParser {
             }
 
             this.skipWhitespace();
-            
+
             // Parse value
             this.context.reset();
             this.context.set(ContextValues.OBJECT_VALUE);
@@ -128,7 +128,7 @@ class JsonParser {
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
-            
+
             if (this.peek() === "]") {
                 this.index++;
                 break;
@@ -168,7 +168,7 @@ class JsonParser {
 
             while (this.index < this.jsonStr.length) {
                 char = this.peek();
-                
+
                 if (char === quote && this.jsonStr[this.index - 1] !== "\\") {
                     this.index++; // skip closing quote
                     break;
@@ -200,18 +200,9 @@ class JsonParser {
             }
         }
 
-        // Convert value types for object values
-        if (!isQuoted && this.context.current === ContextValues.OBJECT_VALUE) {
-            const trimmed = stringAcc.trim();
-            
-            // Try number
-            const num = Number(trimmed);
-            if (!isNaN(num)) return num;
-            
-            // Try boolean/null
-            if (trimmed.toLowerCase() === "true") return true;
-            if (trimmed.toLowerCase() === "false") return false;
-            if (trimmed.toLowerCase() === "null") return null;
+        // Convert value types for object values and array elements
+        if (!isQuoted && (this.context.current === ContextValues.OBJECT_VALUE || this.context.current === ContextValues.ARRAY)) {
+            return this.convertStringToType(stringAcc.trim());
         }
 
         return stringAcc.trim();
@@ -219,7 +210,7 @@ class JsonParser {
 
     parseNumber() {
         let numStr = "";
-        
+
         while (this.index < this.jsonStr.length) {
             const char = this.peek();
             if (!/[-0-9.eE]/.test(char)) break;
@@ -233,7 +224,7 @@ class JsonParser {
 
     parseUnquotedString() {
         let str = "";
-        
+
         while (this.index < this.jsonStr.length) {
             const char = this.peek();
             if ([",", "}", "]", ":"].includes(char) || /\s/.test(char)) break;
@@ -241,7 +232,29 @@ class JsonParser {
             this.index++;
         }
 
-        return str;
+        // Convert value types for unquoted strings
+        return this.convertStringToType(str.trim());
+    }
+
+    /**
+     * convert string to number, boolean, null
+     * @param {string} str - the string to convert
+     * @returns {*} the converted value, or null if cannot convert
+     */
+    convertStringToType(str) {
+        if (!str || str === "") return null;
+
+        // Try number
+        const num = Number(str);
+        if (!isNaN(num)) return num;
+
+        // Try boolean/null
+        const lower = str.toLowerCase();
+        if (lower === "true") return true;
+        if (lower === "false") return false;
+        if (lower === "null") return null;
+
+        return str; // cannot convert
     }
 
     skipWhitespace() {
