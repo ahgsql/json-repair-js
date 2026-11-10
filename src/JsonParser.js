@@ -3,6 +3,7 @@ const { JsonContext, ContextValues } = require('./JsonContext');
 const STRING_DELIMITERS = ['"', "'"];
 const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D]); // space, tab, newline, return
 const QUOTES = new Set([0x22, 0x27]); // " and '
+const DECIMAL_NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
 
 class JsonParser {
     constructor (jsonStr = "", logging = false) {
@@ -65,6 +66,8 @@ class JsonParser {
         if (char === "{") return this.parseObject();
         if (char === "[") return this.parseArray();
         if (STRING_DELIMITERS.includes(char)) return this.parseString();
+        // "-Infinity" and similar: a minus sign followed by a letter is a word, not a number
+        if (char === "-" && /[a-zA-Z]/.test(this.jsonStr[this.index + 1] || "")) return this.parseUnquotedString();
         if (/[-0-9]/.test(char)) return this.parseNumber();
         if (/[a-zA-Z]/.test(char)) return this.parseUnquotedString();
 
@@ -239,14 +242,20 @@ class JsonParser {
     /**
      * convert string to number, boolean, null
      * @param {string} str - the string to convert
-     * @returns {*} the converted value, or null if cannot convert
+     * @returns {*} the converted value; empty input and "null" give null,
+     *              anything that is not a plain JSON-style number, boolean
+     *              or null is returned unchanged as a string
      */
     convertStringToType(str) {
         if (!str || str === "") return null;
 
-        // Try number
-        const num = Number(str);
-        if (!isNaN(num)) return num;
+        // Try number. Only plain decimal notation is accepted: Number() would
+        // also turn "Infinity", "0x10" or "0b1" into numbers, and Infinity
+        // cannot be represented in JSON (JSON.stringify turns it into null).
+        if (DECIMAL_NUMBER.test(str)) {
+            const num = Number(str);
+            if (Number.isFinite(num)) return num;
+        }
 
         // Try boolean/null
         const lower = str.toLowerCase();
