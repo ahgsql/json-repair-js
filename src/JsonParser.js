@@ -83,7 +83,7 @@ class JsonParser {
         }
 
         if (!foundJson) {
-            return "";
+            return this.logging ? ["", this.logger] : "";
         }
 
         const result = this.parseValue();

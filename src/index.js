@@ -22,6 +22,7 @@ function repairJson(jsonStr = "", options = {}) {
     if (!skipJsonParse) {
         try {
             const parsed = JSON.parse(jsonStr);
+            if (logging) return [parsed, []]; // same shape as the repair path below
             return returnObjects ? parsed : JSON.stringify(parsed, null, 2);
         } catch (e) {
             // JSON.parse başarısız olursa devam et
