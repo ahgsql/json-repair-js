@@ -1,17 +1,65 @@
 const { JsonContext, ContextValues } = require('./JsonContext');
 
-const STRING_DELIMITERS = ['"', "'"];
-const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D]); // space, tab, newline, return
-const QUOTES = new Set([0x22, 0x27]); // " and '
+const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D, 0xA0, 0xFEFF]); // space, tab, newline, return, NBSP, BOM
 const DECIMAL_NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
 
+// Quote characters. Besides the ASCII ones, LLMs and word processors produce
+// typographic ("smart") quotes, which are accepted as string delimiters too.
+const DOUBLE_SMART_QUOTES = new Set(["\u201C", "\u201D", "\u201E", "\u201F"]); // “ ” „ ‟
+const SINGLE_SMART_QUOTES = new Set(["\u2018", "\u2019", "\u201A", "\u201B"]); // ‘ ’ ‚ ‛
+const CLOSERS_FOR_DOUBLE_SMART = new Set(["\u201C", "\u201D", '"']);
+const CLOSERS_FOR_SINGLE_SMART = new Set(["\u2018", "\u2019", "'"]);
+
+function isQuoteChar(char) {
+    return char === '"' || char === "'" || DOUBLE_SMART_QUOTES.has(char) || SINGLE_SMART_QUOTES.has(char);
+}
+
+/** The characters that may close a string opened with `open`. */
+function closingQuotes(open) {
+    if (open === '"') return DOUBLE_QUOTE_ONLY;
+    if (open === "'") return SINGLE_QUOTE_ONLY;
+    return DOUBLE_SMART_QUOTES.has(open) ? CLOSERS_FOR_DOUBLE_SMART : CLOSERS_FOR_SINGLE_SMART;
+}
+const DOUBLE_QUOTE_ONLY = new Set(['"']);
+const SINGLE_QUOTE_ONLY = new Set(["'"]);
+
+const SIMPLE_ESCAPES = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", "/": "/", "\\": "\\" };
+
+// Sticky patterns used to peek at what follows a quote (see isClosingQuote)
+const OBJECT_KEY_AHEAD = /[A-Za-z_$][\w$-]*\s*(?::|$)/y; // an unquoted key, or the input ends
+const ARRAY_ELEMENT_AHEAD = /(?:-?\d|[A-Za-z_]+\s*(?:[,\])]|$))/y; // a number or a bare word
+const NUMBER_TOKEN = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/y;
+const NUMBER_END = /[\s,\]})\/:]/;
+
+// Returned (in stream-stable mode only) for a value that is cut off by the end
+// of the input and therefore cannot be known yet, e.g. `12` of `123` or `tru`.
+const INCOMPLETE = Symbol("incomplete");
+
+/** Assigns an own property, also for keys like "__proto__" (as JSON.parse does). */
+function setOwn(obj, key, value) {
+    Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 class JsonParser {
-    constructor (jsonStr = "", logging = false) {
+    /**
+     * @param {string} jsonStr
+     * @param {boolean} logging
+     * @param {Object} [options]
+     * @param {boolean} [options.streamStable] Treat the input as a possibly unfinished
+     *   stream: anything cut off by the end of the input whose final value is not known
+     *   yet (numbers, true/false/null, keys) is left out, and strings keep their
+     *   trailing whitespace. The result for a longer prefix of the same document is
+     *   then always an extension of the result for a shorter one.
+     */
+    constructor (jsonStr = "", logging = false, { streamStable = false } = {}) {
+        this.streamStable = streamStable;
         this.jsonStr = jsonStr;
         this.index = 0;
         this.context = new JsonContext();
         this.logging = logging;
         this.logger = [];
+        // Stack of the containers being parsed: '{', '[' or '(' (Python tuple)
+        this.containers = [];
     }
 
     log(text) {
@@ -50,7 +98,7 @@ class JsonParser {
         }
 
         if (!foundJson) {
-            return "";
+            return this.logging ? ["", this.logger] : "";
         }
 
         const result = this.parseValue();
@@ -63,9 +111,13 @@ class JsonParser {
 
         if (!char) return "";
 
+        // A lone "/" at the very end may be the beginning of a comment
+        if (this.streamStable && char === "/" && this.index === this.jsonStr.length - 1) return INCOMPLETE;
+
         if (char === "{") return this.parseObject();
         if (char === "[") return this.parseArray();
-        if (STRING_DELIMITERS.includes(char)) return this.parseString();
+        if (char === "(") return this.parseArray(")"); // Python tuple -> array
+        if (isQuoteChar(char)) return this.parseString();
         // "-Infinity" and similar: a minus sign followed by a letter is a word, not a number
         if (char === "-" && /[a-zA-Z]/.test(this.jsonStr[this.index + 1] || "")) return this.parseUnquotedString();
         if (/[-0-9]/.test(char)) return this.parseNumber();
@@ -78,9 +130,18 @@ class JsonParser {
     parseObject() {
         const obj = {};
         this.index++; // skip {
+        this.containers.push("{");
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
+
+            // Stray commas, e.g. {"a": 1,, "b": 2}
+            while (this.peek() === ",") {
+                this.index++;
+                this.skipWhitespace();
+            }
+
+            if (this.index >= this.jsonStr.length) break;
 
             if (this.peek() === "}") {
                 this.index++;
@@ -89,8 +150,12 @@ class JsonParser {
 
             // Parse key
             this.context.set(ContextValues.OBJECT_KEY);
-            const key = this.parseString() || this.parseUnquotedString();
-            if (!key) break;
+            const keyStart = this.index;
+            const key = this.parseString(true) || this.parseUnquotedString(false);
+            // Nothing could be read as a key (an empty quoted key "" is fine)
+            if (key === "" && this.index === keyStart) break;
+            // Stream-stable: the key may still grow, or its value has not started yet
+            if (this.streamStable && this.index >= this.jsonStr.length) break;
 
             this.skipWhitespace();
 
@@ -102,6 +167,7 @@ class JsonParser {
             }
 
             this.skipWhitespace();
+            if (this.streamStable && this.index >= this.jsonStr.length) break;
 
             // Parse value
             this.context.reset();
@@ -109,9 +175,8 @@ class JsonParser {
             const value = this.parseValue();
             this.context.reset();
 
-            if (key) {
-                obj[key] = value;
-            }
+            if (value === INCOMPLETE) break;
+            setOwn(obj, key, value);
 
             this.skipWhitespace();
 
@@ -121,23 +186,30 @@ class JsonParser {
             }
         }
 
+        this.containers.pop();
         return obj;
     }
 
-    parseArray() {
+    parseArray(closer = "]") {
         const arr = [];
-        this.index++; // skip [
+        this.index++; // skip [ (or ( for tuples)
+        this.containers.push(closer === ")" ? "(" : "[");
         this.context.set(ContextValues.ARRAY);
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
 
-            if (this.peek() === "]") {
+            // Nothing left (e.g. trailing comma or comment at the end of the input)
+            if (this.index >= this.jsonStr.length) break;
+
+            // The expected closer, or a mismatched one such as "}" in "[1, 2}"
+            if (this.peek() === closer || this.peek() === "]" || this.peek() === "}" || this.peek() === ")") {
                 this.index++;
                 break;
             }
 
             const value = this.parseValue();
+            if (value === INCOMPLETE) break;
             if (value !== undefined) {
                 arr.push(value);
             }
@@ -151,28 +223,29 @@ class JsonParser {
         }
 
         this.context.reset();
+        this.containers.pop();
         return arr;
     }
 
-    parseString() {
+    parseString(isKey = false) {
+        this.skipWhitespace();
         let char = this.peek();
-        let isQuoted = STRING_DELIMITERS.includes(char);
+        const isQuoted = isQuoteChar(char);
         let stringAcc = "";
 
-        // Skip leading whitespace
-        while (char && /\s/.test(char)) {
-            this.index++;
-            char = this.peek();
-        }
-
         if (isQuoted) {
-            const quote = char;
+            const closers = closingQuotes(char);
             this.index++; // skip opening quote
 
             while (this.index < this.jsonStr.length) {
                 char = this.peek();
 
-                if (char === quote && this.jsonStr[this.index - 1] !== "\\") {
+                if (char === "\\") {
+                    stringAcc += this.readEscape();
+                    continue;
+                }
+
+                if (closers.has(char) && this.isClosingQuote(this.index, isKey)) {
                     this.index++; // skip closing quote
                     break;
                 }
@@ -180,60 +253,147 @@ class JsonParser {
                 stringAcc += char;
                 this.index++;
             }
-        } else {
-            // For unquoted strings, collect until delimiter
-            while (this.index < this.jsonStr.length) {
-                char = this.peek();
 
-                if ([",", "}", "]", ":"].includes(char)) {
-                    break;
-                } else if (/\s/.test(char)) {
-                    // Skip whitespace between words
-                    if (stringAcc && this.index < this.jsonStr.length - 1) {
-                        const nextChar = this.jsonStr[this.index + 1];
-                        if (!/[,}\]:]/.test(nextChar)) {
-                            stringAcc += " ";
-                        }
+            return stringAcc;
+        }
+
+        // For unquoted strings, collect until delimiter
+        while (this.index < this.jsonStr.length) {
+            char = this.peek();
+
+            if ([",", "}", "]", ":"].includes(char)) {
+                break;
+            } else if (/\s/.test(char)) {
+                // Skip whitespace between words
+                if (stringAcc && this.index < this.jsonStr.length - 1) {
+                    const nextChar = this.jsonStr[this.index + 1];
+                    if (!/[,}\]:]/.test(nextChar)) {
+                        stringAcc += " ";
                     }
-                } else {
-                    stringAcc += char;
                 }
-
-                this.index++;
+            } else {
+                stringAcc += char;
             }
+
+            this.index++;
         }
 
         // Convert value types for object values and array elements
-        if (!isQuoted && (this.context.current === ContextValues.OBJECT_VALUE || this.context.current === ContextValues.ARRAY)) {
+        if (this.context.current === ContextValues.OBJECT_VALUE || this.context.current === ContextValues.ARRAY) {
             return this.convertStringToType(stringAcc.trim());
         }
 
         return stringAcc.trim();
     }
 
-    parseNumber() {
-        let numStr = "";
+    /**
+     * Decodes the escape sequence at the current index (which points at the
+     * backslash), moves past it and returns the text it stands for.
+     */
+    readEscape() {
+        const str = this.jsonStr;
+        const next = str[this.index + 1];
 
-        while (this.index < this.jsonStr.length) {
-            const char = this.peek();
-            if (!/[-0-9.eE]/.test(char)) break;
-            numStr += char;
-            this.index++;
+        // A lone backslash at the very end of the input
+        if (next === undefined) {
+            this.index = str.length;
+            return "";
         }
 
-        const num = Number(numStr);
-        return isNaN(num) ? numStr : num;
+        if (next === "u") {
+            const hex = str.slice(this.index + 2, this.index + 6);
+            if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                this.index += 6;
+                return String.fromCharCode(parseInt(hex, 16));
+            }
+            // \uXX cut off by the end of the input: drop the unfinished escape
+            if (hex.length < 4 && /^[0-9a-fA-F]*$/.test(hex)) {
+                this.index = str.length;
+                return "";
+            }
+            this.index += 2;
+            return "\\u";
+        }
+
+        this.index += 2;
+        if (Object.prototype.hasOwnProperty.call(SIMPLE_ESCAPES, next)) return SIMPLE_ESCAPES[next];
+        if (isQuoteChar(next)) return next; // \" \' and escaped smart quotes
+        return "\\" + next; // unknown escape such as \d or \U: keep it as written
     }
 
-    parseUnquotedString() {
+    /**
+     * Decides whether the quote at `quotePos` ends the string or is an
+     * unescaped quote that is part of its text, e.g. {"a": "say "hi" now"}.
+     * It looks at what follows the quote: a closing bracket, the end of the
+     * input, or a comma / whitespace followed by something that looks like the
+     * next key or value means the string ends here.
+     */
+    isClosingQuote(quotePos, isKey) {
+        if (isKey) return true;
+
+        const str = this.jsonStr;
+        const next = this.skipWhitespaceFrom(quotePos + 1);
+        const sawSpace = next > quotePos + 1;
+
+        if (next >= str.length) return true;
+
+        const char = str[next];
+        if (char === "}" || char === "]" || char === ")") return true;
+        if (char === ",") return this.startsNewElement(this.skipWhitespaceFrom(next + 1));
+        if (char === ":") return false;
+        // Another string right after: `"a" "b"` is a missing comma, `"a""b"` is not
+        if (isQuoteChar(char)) return sawSpace;
+
+        return sawSpace && this.looksLikeElement(next);
+    }
+
+    /** Whether a new key (in an object) or element (in an array) starts at `pos`. */
+    startsNewElement(pos) {
+        if (pos >= this.jsonStr.length) return true;
+        const char = this.jsonStr[pos];
+        if (isQuoteChar(char) || "{[}]()".includes(char)) return true;
+        return this.looksLikeElement(pos);
+    }
+
+    looksLikeElement(pos) {
+        const pattern = this.containers[this.containers.length - 1] === "{" ? OBJECT_KEY_AHEAD : ARRAY_ELEMENT_AHEAD;
+        pattern.lastIndex = pos;
+        return pattern.test(this.jsonStr);
+    }
+
+    parseNumber() {
+        NUMBER_TOKEN.lastIndex = this.index;
+        const match = NUMBER_TOKEN.exec(this.jsonStr);
+        if (!match) return this.parseUnquotedString();
+
+        const end = this.index + match[0].length;
+        const after = this.jsonStr[end];
+        // Things like 1.2.3, 0x10 or 12px are words, not numbers
+        if (after !== undefined && !NUMBER_END.test(after)) return this.parseUnquotedString();
+
+        const num = Number(match[0]);
+        if (!Number.isFinite(num)) return this.parseUnquotedString(); // 1e999
+        this.index = end;
+        // At the end of the input the number may still get more digits
+        if (this.streamStable && end >= this.jsonStr.length) return INCOMPLETE;
+        return num;
+    }
+
+    parseUnquotedString(convert = true) {
         let str = "";
 
         while (this.index < this.jsonStr.length) {
             const char = this.peek();
             if ([",", "}", "]", ":"].includes(char) || /\s/.test(char)) break;
+            if (char === ")" && this.containers[this.containers.length - 1] === "(") break;
             str += char;
             this.index++;
         }
+
+        if (!convert) return str.trim();
+
+        // At the end of the input the word may still get more characters (tru -> true)
+        if (this.streamStable && this.index >= this.jsonStr.length) return INCOMPLETE;
 
         // Convert value types for unquoted strings
         return this.convertStringToType(str.trim());
@@ -261,17 +421,39 @@ class JsonParser {
         const lower = str.toLowerCase();
         if (lower === "true") return true;
         if (lower === "false") return false;
-        if (lower === "null") return null;
+        if (lower === "null" || lower === "none") return null; // "None" is the Python spelling
 
         return str; // cannot convert
     }
 
     skipWhitespace() {
-        while (this.index < this.jsonStr.length) {
-            const code = this.jsonStr.charCodeAt(this.index);
-            if (!WHITESPACE.has(code)) break;
-            this.index++;
+        this.index = this.skipWhitespaceFrom(this.index);
+    }
+
+    /**
+     * Returns the first index at or after `pos` that is neither whitespace nor
+     * part of a comment. Supports `// line` and `/* block *\/` comments, which
+     * LLMs like to add to the JSON they produce.
+     */
+    skipWhitespaceFrom(pos) {
+        const str = this.jsonStr;
+        while (pos < str.length) {
+            const code = str.charCodeAt(pos);
+            if (WHITESPACE.has(code)) {
+                pos++;
+            } else if (code === 0x2F && str.charCodeAt(pos + 1) === 0x2F) {
+                // line comment: up to the end of the line
+                pos += 2;
+                while (pos < str.length && str[pos] !== "\n" && str[pos] !== "\r") pos++;
+            } else if (code === 0x2F && str.charCodeAt(pos + 1) === 0x2A) {
+                // block comment: up to the closing marker (or the end of the input)
+                const end = str.indexOf("*/", pos + 2);
+                pos = end === -1 ? str.length : end + 2;
+            } else {
+                break;
+            }
         }
+        return pos;
     }
 
     peek() {

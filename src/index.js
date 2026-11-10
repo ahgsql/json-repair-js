@@ -8,6 +8,9 @@ const JsonParser = require('./JsonParser');
  * @param {boolean} options.skipJsonParse - true ise JSON.parse kontrolünü atlar
  * @param {boolean} options.logging - true ise onarım loglarını da döner
  * @param {boolean} options.ensureAscii - false ise Unicode karakterleri korur
+ * @param {boolean} options.streamStable - true ise girdi, henüz bitmemiş bir akış olarak ele alınır:
+ *   sonu kesilmiş sayı/true/false/null değerleri ve anahtarlar sonuca eklenmez, daha uzun bir girdinin
+ *   sonucu her zaman daha kısa olanın devamı olur
  * @returns {string|Object} Onarılmış JSON string'i veya objesi
  */
 function repairJson(jsonStr = "", options = {}) {
@@ -15,13 +18,15 @@ function repairJson(jsonStr = "", options = {}) {
         returnObjects = false,
         skipJsonParse = false,
         logging = false,
-        ensureAscii = true
+        ensureAscii = true,
+        streamStable = false
     } = options;
 
     // Önce normal JSON.parse ile dene
     if (!skipJsonParse) {
         try {
             const parsed = JSON.parse(jsonStr);
+            if (logging) return [parsed, []]; // same shape as the repair path below
             return returnObjects ? parsed : JSON.stringify(parsed, null, 2);
         } catch (e) {
             // JSON.parse başarısız olursa devam et
@@ -29,7 +34,7 @@ function repairJson(jsonStr = "", options = {}) {
     }
 
     // JSON.parse başarısız olduysa veya atlanması istendiyse, onararak parse et
-    const parser = new JsonParser(jsonStr, logging);
+    const parser = new JsonParser(jsonStr, logging, { streamStable });
     const result = parser.parse();
 
     if (logging) {

@@ -9,6 +9,10 @@ JavaScript kütüphanesi olarak LLM'ler tarafından üretilen veya bozuk olan JS
 - Eksik virgülleri düzeltme
 - Unicode karakterleri koruma
 - Markdown/text içindeki JSON'ları bulma
+- Yorumları atlama; Python `None`/`True`/`False`/tuple desteği
+- Kaçışsız ve akıllı tırnakları işleme, kaçış dizilerini çözme
+- Bitmemiş girdi için akışa uygun çıktı (`streamStable`)
+- TypeScript tipleri dahil
 
 ## Kurulum
 
@@ -66,6 +70,49 @@ const result2 = repairJson(brokenJson, {
 ```javascript
 repairJson('{ test: "Türkçe" }', { ensureAscii: false })
 // Çıktı: { "test": "Türkçe" }
+```
+
+5. Yorum satırlarını (`//` ve `/* */`) atlama:
+```javascript
+'{ "a": 1, // not\n "b": 2 }' -> '{ "a": 1, "b": 2 }'
+```
+
+6. Python değerleri: `None` `null` olur, `True`/`False` boolean olur, tuple'lar dizi olur:
+```javascript
+"{'a': None, 'b': True, 'c': (1, 2)}" -> '{ "a": null, "b": true, "c": [1, 2] }'
+```
+
+7. Kaçışsız ve akıllı (typographic) tırnaklar:
+```javascript
+'{"a": "he said "hi" to me"}' -> '{ "a": "he said \\"hi\\" to me" }'
+'{“a”: “b”}'                  -> '{ "a": "b" }'
+```
+
+8. `\n`, `\t`, `\u00e9` gibi kaçış dizileri, bozuk JSON'da da çözülür.
+
+## Akış (bitmemiş girdi)
+
+Girdi hâlâ üretiliyorsa (ör. token token akan bir LLM yanıtı) `streamStable: true` verin. Girdinin sonunda
+kesilmiş ve son hâli henüz belli olmayan her şey (`123`'ün `12`'si, `tru`, değeri henüz gelmemiş bir anahtar)
+sonuca eklenmez. Böylece bir belgenin daha uzun bir önekinin sonucu, her zaman daha kısa olanın devamı olur.
+Yarım kalmış string'ler olduğu yere kadar döner.
+
+```javascript
+loads('{"a": 1, "b": 12', { streamStable: true });   // { a: 1 }
+loads('{"a": 1, "b": 123}', { streamStable: true }); // { a: 1, b: 123 }
+loads('{"a": 1, "text": "Mer', { streamStable: true }); // { a: 1, text: "Mer" }
+```
+
+## TypeScript
+
+Tip tanımları pakete dahildir (`src/index.d.ts`):
+
+```typescript
+import { repairJson, loads } from 'json-repair-js';
+
+const user = loads<{ name: string }>('{ name: John }');
+const json: string = repairJson('{ name: John }');
+const [value, logs] = repairJson('{ name: John }', { logging: true });
 ```
 
 ## Lisans
