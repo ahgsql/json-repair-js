@@ -1,7 +1,7 @@
 const { JsonContext, ContextValues } = require('./JsonContext');
 
 const STRING_DELIMITERS = ['"', "'"];
-const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D]); // space, tab, newline, return
+const WHITESPACE = new Set([0x20, 0x09, 0x0A, 0x0D, 0xA0, 0xFEFF]); // space, tab, newline, return, NBSP, BOM
 const QUOTES = new Set([0x22, 0x27]); // " and '
 const DECIMAL_NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
 
@@ -12,6 +12,8 @@ class JsonParser {
         this.context = new JsonContext();
         this.logging = logging;
         this.logger = [];
+        // Stack of the containers being parsed: '{', '[' or '(' (Python tuple)
+        this.containers = [];
     }
 
     log(text) {
@@ -65,6 +67,7 @@ class JsonParser {
 
         if (char === "{") return this.parseObject();
         if (char === "[") return this.parseArray();
+        if (char === "(") return this.parseArray(")"); // Python tuple -> array
         if (STRING_DELIMITERS.includes(char)) return this.parseString();
         // "-Infinity" and similar: a minus sign followed by a letter is a word, not a number
         if (char === "-" && /[a-zA-Z]/.test(this.jsonStr[this.index + 1] || "")) return this.parseUnquotedString();
@@ -78,6 +81,7 @@ class JsonParser {
     parseObject() {
         const obj = {};
         this.index++; // skip {
+        this.containers.push("{");
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
@@ -121,18 +125,24 @@ class JsonParser {
             }
         }
 
+        this.containers.pop();
         return obj;
     }
 
-    parseArray() {
+    parseArray(closer = "]") {
         const arr = [];
-        this.index++; // skip [
+        this.index++; // skip [ (or ( for tuples)
+        this.containers.push(closer === ")" ? "(" : "[");
         this.context.set(ContextValues.ARRAY);
 
         while (this.index < this.jsonStr.length) {
             this.skipWhitespace();
 
-            if (this.peek() === "]") {
+            // Nothing left (e.g. trailing comma or comment at the end of the input)
+            if (this.index >= this.jsonStr.length) break;
+
+            // The expected closer, or a mismatched one such as "}" in "[1, 2}"
+            if (this.peek() === closer || this.peek() === "]" || this.peek() === "}" || this.peek() === ")") {
                 this.index++;
                 break;
             }
@@ -151,6 +161,7 @@ class JsonParser {
         }
 
         this.context.reset();
+        this.containers.pop();
         return arr;
     }
 
@@ -231,6 +242,7 @@ class JsonParser {
         while (this.index < this.jsonStr.length) {
             const char = this.peek();
             if ([",", "}", "]", ":"].includes(char) || /\s/.test(char)) break;
+            if (char === ")" && this.containers[this.containers.length - 1] === "(") break;
             str += char;
             this.index++;
         }
@@ -261,17 +273,39 @@ class JsonParser {
         const lower = str.toLowerCase();
         if (lower === "true") return true;
         if (lower === "false") return false;
-        if (lower === "null") return null;
+        if (lower === "null" || lower === "none") return null; // "None" is the Python spelling
 
         return str; // cannot convert
     }
 
     skipWhitespace() {
-        while (this.index < this.jsonStr.length) {
-            const code = this.jsonStr.charCodeAt(this.index);
-            if (!WHITESPACE.has(code)) break;
-            this.index++;
+        this.index = this.skipWhitespaceFrom(this.index);
+    }
+
+    /**
+     * Returns the first index at or after `pos` that is neither whitespace nor
+     * part of a comment. Supports `// line` and `/* block *\/` comments, which
+     * LLMs like to add to the JSON they produce.
+     */
+    skipWhitespaceFrom(pos) {
+        const str = this.jsonStr;
+        while (pos < str.length) {
+            const code = str.charCodeAt(pos);
+            if (WHITESPACE.has(code)) {
+                pos++;
+            } else if (code === 0x2F && str.charCodeAt(pos + 1) === 0x2F) {
+                // line comment: up to the end of the line
+                pos += 2;
+                while (pos < str.length && str[pos] !== "\n" && str[pos] !== "\r") pos++;
+            } else if (code === 0x2F && str.charCodeAt(pos + 1) === 0x2A) {
+                // block comment: up to the closing marker (or the end of the input)
+                const end = str.indexOf("*/", pos + 2);
+                pos = end === -1 ? str.length : end + 2;
+            } else {
+                break;
+            }
         }
+        return pos;
     }
 
     peek() {
