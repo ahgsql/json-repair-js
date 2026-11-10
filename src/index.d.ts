@@ -24,6 +24,14 @@ export interface RepairOptions {
     logging?: boolean;
     /** Escape non-ASCII characters as `\uXXXX` in the returned JSON string (default `true`). */
     ensureAscii?: boolean;
+    /**
+     * Treat the input as a possibly unfinished stream (e.g. LLM output that is still being
+     * generated). Values cut off by the end of the input whose final form is not known yet
+     * (numbers, `true`/`false`/`null`, keys) are left out and strings keep their trailing
+     * whitespace, so the result for a longer prefix of a document always extends the result
+     * for a shorter one. Strings that are cut off are returned as far as they go.
+     */
+    streamStable?: boolean;
 }
 
 export type LoadsOptions = Omit<RepairOptions, "returnObjects">;

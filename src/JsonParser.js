@@ -31,13 +31,28 @@ const ARRAY_ELEMENT_AHEAD = /(?:-?\d|[A-Za-z_]+\s*(?:[,\])]|$))/y; // a number o
 const NUMBER_TOKEN = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/y;
 const NUMBER_END = /[\s,\]})\/:]/;
 
+// Returned (in stream-stable mode only) for a value that is cut off by the end
+// of the input and therefore cannot be known yet, e.g. `12` of `123` or `tru`.
+const INCOMPLETE = Symbol("incomplete");
+
 /** Assigns an own property, also for keys like "__proto__" (as JSON.parse does). */
 function setOwn(obj, key, value) {
     Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 class JsonParser {
-    constructor (jsonStr = "", logging = false) {
+    /**
+     * @param {string} jsonStr
+     * @param {boolean} logging
+     * @param {Object} [options]
+     * @param {boolean} [options.streamStable] Treat the input as a possibly unfinished
+     *   stream: anything cut off by the end of the input whose final value is not known
+     *   yet (numbers, true/false/null, keys) is left out, and strings keep their
+     *   trailing whitespace. The result for a longer prefix of the same document is
+     *   then always an extension of the result for a shorter one.
+     */
+    constructor (jsonStr = "", logging = false, { streamStable = false } = {}) {
+        this.streamStable = streamStable;
         this.jsonStr = jsonStr;
         this.index = 0;
         this.context = new JsonContext();
@@ -96,6 +111,9 @@ class JsonParser {
 
         if (!char) return "";
 
+        // A lone "/" at the very end may be the beginning of a comment
+        if (this.streamStable && char === "/" && this.index === this.jsonStr.length - 1) return INCOMPLETE;
+
         if (char === "{") return this.parseObject();
         if (char === "[") return this.parseArray();
         if (char === "(") return this.parseArray(")"); // Python tuple -> array
@@ -136,6 +154,8 @@ class JsonParser {
             const key = this.parseString(true) || this.parseUnquotedString(false);
             // Nothing could be read as a key (an empty quoted key "" is fine)
             if (key === "" && this.index === keyStart) break;
+            // Stream-stable: the key may still grow, or its value has not started yet
+            if (this.streamStable && this.index >= this.jsonStr.length) break;
 
             this.skipWhitespace();
 
@@ -147,6 +167,7 @@ class JsonParser {
             }
 
             this.skipWhitespace();
+            if (this.streamStable && this.index >= this.jsonStr.length) break;
 
             // Parse value
             this.context.reset();
@@ -154,6 +175,7 @@ class JsonParser {
             const value = this.parseValue();
             this.context.reset();
 
+            if (value === INCOMPLETE) break;
             setOwn(obj, key, value);
 
             this.skipWhitespace();
@@ -187,6 +209,7 @@ class JsonParser {
             }
 
             const value = this.parseValue();
+            if (value === INCOMPLETE) break;
             if (value !== undefined) {
                 arr.push(value);
             }
@@ -351,6 +374,8 @@ class JsonParser {
         const num = Number(match[0]);
         if (!Number.isFinite(num)) return this.parseUnquotedString(); // 1e999
         this.index = end;
+        // At the end of the input the number may still get more digits
+        if (this.streamStable && end >= this.jsonStr.length) return INCOMPLETE;
         return num;
     }
 
@@ -365,8 +390,13 @@ class JsonParser {
             this.index++;
         }
 
+        if (!convert) return str.trim();
+
+        // At the end of the input the word may still get more characters (tru -> true)
+        if (this.streamStable && this.index >= this.jsonStr.length) return INCOMPLETE;
+
         // Convert value types for unquoted strings
-        return convert ? this.convertStringToType(str.trim()) : str.trim();
+        return this.convertStringToType(str.trim());
     }
 
     /**
