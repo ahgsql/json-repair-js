@@ -1,6 +1,6 @@
 {
   "name": "json-repair-js",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "JavaScript library to repair broken/invalid JSON strings, especially from LLM outputs",
   "main": "src/index.js",
   "types": "src/index.d.ts",
